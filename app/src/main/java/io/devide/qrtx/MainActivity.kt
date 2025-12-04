@@ -1,8 +1,10 @@
 package io.devide.qrtx
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -45,6 +47,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import io.devide.qrtx.ui.theme.QrtxTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -79,49 +82,19 @@ class MainActivity : ComponentActivity() {
                                 contentAlignment = Alignment.Center
                             ) {
                                 reconstructedFile?.let { file ->
-                                    val imageBitmap = remember(file) {
-                                        BitmapFactory.decodeFile(file.absolutePath)?.asImageBitmap()
-                                    }
-                                    if (imageBitmap != null) {
-                                        Image(
-                                            bitmap = imageBitmap,
-                                            contentDescription = "Reconstructed Image",
-                                            modifier = Modifier.fillMaxSize()
-                                        )
-                                    } else {
-                                        Column(
-                                            horizontalAlignment = Alignment.CenterHorizontally,
-                                            modifier = Modifier.padding(16.dp)
-                                        ) {
-                                            Text(
-                                                text = "Could not display image",
-                                                style = typography.headlineSmall,
-                                                color = Color.Red
-                                            )
-                                            Text(
-                                                text = "The reconstructed file may be corrupted or incomplete.",
-                                                style = typography.bodyMedium,
-                                                modifier = Modifier.padding(top = 8.dp)
-                                            )
-                                            Text(
-                                                text = "File size: ${file.length()} bytes",
-                                                style = typography.bodySmall,
-                                                modifier = Modifier.padding(top = 4.dp)
-                                            )
-                                            Button(
-                                                onClick = {
-                                                    reconstructedFile = null
-                                                    isReconstructing = false
-                                                    decoder = null
-                                                    processedSeeds = emptySet()
-                                                    errorMessage = "Previous reconstruction failed. Please scan QR codes again."
-                                                },
-                                                modifier = Modifier.padding(top = 16.dp)
-                                            ) {
-                                                Text("Try Again")
-                                            }
+                                    ReconstructedFileView(
+                                        file = file,
+                                        onOpenWithOtherApps = { fileToOpen ->
+                                            openFileWithOtherApps(fileToOpen)
+                                        },
+                                        onReset = {
+                                            reconstructedFile = null
+                                            isReconstructing = false
+                                            decoder = null
+                                            processedSeeds = emptySet()
+                                            errorMessage = null
                                         }
-                                    }
+                                    )
                                 }
                             }
                         }
@@ -346,15 +319,115 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun saveFile(data: ByteArray, fileName: String): File {
+    /**
+     * Detect file type from magic bytes (file header)
+     */
+    private fun detectFileType(data: ByteArray): String {
+        if (data.size < 4) return "bin"
+        
+        // Check common file signatures
+        val header = data.sliceArray(0 until minOf(16, data.size))
+        
+        return when {
+            // Images
+            header.size >= 8 && header[0] == 0x89.toByte() && header[1] == 0x50.toByte() && 
+            header[2] == 0x4E.toByte() && header[3] == 0x47.toByte() -> "png"
+            header.size >= 2 && header[0] == 0xFF.toByte() && header[1] == 0xD8.toByte() -> "jpg"
+            header.size >= 6 && header[0] == 0x47.toByte() && header[1] == 0x49.toByte() && 
+            header[2] == 0x46.toByte() && header[3] == 0x38.toByte() -> "gif"
+            header.size >= 12 && header[0] == 0x52.toByte() && header[1] == 0x49.toByte() && 
+            header[2] == 0x46.toByte() && header[3] == 0x46.toByte() -> "webp"
+            
+            // Documents
+            header.size >= 4 && header[0] == 0x50.toByte() && header[1] == 0x4B.toByte() && 
+            (header[2] == 0x03.toByte() || header[2] == 0x05.toByte() || header[2] == 0x07.toByte()) && 
+            (header[3] == 0x04.toByte() || header[3] == 0x06.toByte() || header[3] == 0x08.toByte()) -> "zip"
+            header.size >= 4 && header[0] == 0x25.toByte() && header[1] == 0x50.toByte() && 
+            header[2] == 0x44.toByte() && header[3] == 0x46.toByte() -> "pdf"
+            
+            // Archives
+            header.size >= 3 && header[0] == 0x1F.toByte() && header[1] == 0x8B.toByte() && 
+            header[2] == 0x08.toByte() -> "gz"
+            
+            // Text files (try to detect UTF-8/BOM)
+            header.size >= 3 && header[0] == 0xEF.toByte() && header[1] == 0xBB.toByte() && 
+            header[2] == 0xBF.toByte() -> "txt"
+            
+            // Default to binary if we can't detect
+            else -> "bin"
+        }
+    }
+    
+    private fun saveFile(data: ByteArray, defaultFileName: String): File {
+        // Detect file type and use appropriate extension
+        val fileType = detectFileType(data)
+        val extension = if (fileType == "bin") {
+            // If binary, try to extract extension from default filename, or use .bin
+            defaultFileName.substringAfterLast('.', "bin")
+        } else {
+            fileType
+        }
+        
+        val fileName = if (defaultFileName.contains('.')) {
+            defaultFileName.substringBeforeLast('.') + ".$extension"
+        } else {
+            "reconstructed.$extension"
+        }
+        
         val file = File(filesDir, fileName)
         try {
             file.writeBytes(data)
-            Log.d("MainActivity", "File saved to ${file.absolutePath}")
+            Log.d("MainActivity", "File saved to ${file.absolutePath}, type: $fileType")
         } catch (e: Exception) {
             Log.e("MainActivity", "Error saving file", e)
         }
         return file
+    }
+    
+    /**
+     * Open file with other apps using Intent
+     */
+    private fun openFileWithOtherApps(file: File) {
+        try {
+            val uri = FileProvider.getUriForFile(
+                this,
+                "${packageName}.fileprovider",
+                file
+            )
+            
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, getMimeType(file))
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            
+            if (intent.resolveActivity(packageManager) != null) {
+                startActivity(Intent.createChooser(intent, "Open with..."))
+            } else {
+                Log.e("MainActivity", "No app found to open file: ${file.name}")
+            }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error opening file", e)
+        }
+    }
+    
+    /**
+     * Get MIME type for file
+     */
+    private fun getMimeType(file: File): String {
+        val extension = file.name.substringAfterLast('.', "").lowercase()
+        return when (extension) {
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "pdf" -> "application/pdf"
+            "zip" -> "application/zip"
+            "txt" -> "text/plain"
+            "json" -> "application/json"
+            "xml" -> "application/xml"
+            else -> "application/octet-stream"
+        }
     }
 
     private fun Droplet.toMap(): Map<String, Any> {
@@ -367,6 +440,95 @@ class MainActivity : ComponentActivity() {
         )
     }
 }
+
+/**
+ * Format file size in human-readable format
+ */
+fun formatFileSizeHelper(bytes: Long): String {
+    val kb = bytes / 1024.0
+    val mb = kb / 1024.0
+    val gb = mb / 1024.0
+    
+    return when {
+        gb >= 1.0 -> String.format("%.2f GB", gb)
+        mb >= 1.0 -> String.format("%.2f MB", mb)
+        kb >= 1.0 -> String.format("%.2f KB", kb)
+        else -> "$bytes bytes"
+    }
+}
+
+@Composable
+fun ReconstructedFileView(
+    file: File,
+    onOpenWithOtherApps: (File) -> Unit,
+    onReset: () -> Unit
+) {
+    val imageBitmap = remember(file) {
+        BitmapFactory.decodeFile(file.absolutePath)?.asImageBitmap()
+    }
+    
+    if (imageBitmap != null) {
+        // Display image
+        Image(
+            bitmap = imageBitmap,
+            contentDescription = "Reconstructed Image",
+            modifier = Modifier.fillMaxSize()
+        )
+    } else {
+        // Display file info for non-image files
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Text(
+                text = "File Reconstructed",
+                style = typography.headlineMedium,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            
+            Text(
+                text = "File Name:",
+                style = typography.titleSmall,
+                color = Color.Gray
+            )
+            Text(
+                text = file.name,
+                style = typography.bodyLarge,
+                modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
+            )
+            
+            Text(
+                text = "File Size:",
+                style = typography.titleSmall,
+                color = Color.Gray
+            )
+            Text(
+                text = formatFileSizeHelper(file.length()),
+                style = typography.bodyLarge,
+                modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
+            )
+            
+            Button(
+                onClick = { onOpenWithOtherApps(file) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 32.dp, vertical = 8.dp)
+            ) {
+                Text("Open with Other Apps")
+            }
+            
+            Button(
+                onClick = onReset,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 32.dp, vertical = 8.dp)
+            ) {
+                Text("Scan Another File")
+            }
+        }
+    }
+}
+
 
 @Composable
 fun CameraPreview(
