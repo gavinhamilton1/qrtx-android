@@ -103,7 +103,7 @@ class MainActivity : ComponentActivity() {
                             // Show camera and reconstruction status overlay
                             Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
                                 CameraPreview(
-                                    modifier = Modifier.fillMaxWidth().fillMaxHeight(0.5f),
+                                    modifier = Modifier.fillMaxWidth().fillMaxHeight(0.6f),
                                     onQrCodeScanned = { qrCode ->
                                         try {
                                             val droplet = Droplet.fromString(qrCode)
