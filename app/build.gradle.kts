@@ -59,6 +59,9 @@ dependencies {
 
     // ML Kit barcode scanning
     implementation("com.google.mlkit:barcode-scanning:17.2.0")
+    
+    // Lightweight HTTP server for serving local files
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

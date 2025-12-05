@@ -52,8 +52,11 @@ import io.devide.qrtx.ui.theme.QrtxTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.zip.ZipInputStream
 
 class MainActivity : ComponentActivity() {
 
@@ -74,8 +77,19 @@ class MainActivity : ComponentActivity() {
                     var numSolved by remember { mutableStateOf(0) }
                     var decoder by remember { mutableStateOf<FountainCodeDecoder?>(null) }
                     var processedSeeds by remember { mutableStateOf(setOf<Long>()) }
+                    var isCapturing by remember { mutableStateOf(false) }
+                    var unzippedContentDir by remember { mutableStateOf<File?>(null) }
+                    var showWebView by remember { mutableStateOf(false) }
 
                     when {
+                        showWebView && unzippedContentDir != null -> {
+                            WebViewScreen(
+                                contentDirectory = unzippedContentDir!!,
+                                onBack = { showWebView = false },
+                                modifier = Modifier.padding(innerPadding)
+                            )
+                        }
+                        
                         reconstructedFile != null -> {
                             Box(
                                 modifier = Modifier.fillMaxSize().padding(innerPadding),
@@ -93,115 +107,74 @@ class MainActivity : ComponentActivity() {
                                             decoder = null
                                             processedSeeds = emptySet()
                                             errorMessage = null
+                                            isCapturing = false // Return to home screen
+                                            receivedDroplets.clear()
+                                            numBlocks = 0
+                                            blockSize = 0
+                                            fileSize = 0L
+                                            numSolved = 0
+                                            reconstructionProgress = 0.0
                                         }
                                     )
                                 }
                             }
                         }
-
-                        else -> {
-                            // Show camera and reconstruction status overlay
-                            Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
-                                CameraPreview(
-                                    modifier = Modifier.fillMaxWidth().fillMaxHeight(0.6f),
-                                    onQrCodeScanned = { qrCode ->
-                                        try {
-                                            val droplet = Droplet.fromString(qrCode)
-                                            if (droplet != null) {
-                                                errorMessage = null // Clear error on successful parse
-                                                if (!receivedDroplets.containsKey(droplet.seed)) {
-                                                    if (receivedDroplets.isEmpty()) {
-                                                        numBlocks = droplet.numBlocks
-                                                        fileSize = droplet.fileSize
-                                                        blockSize = droplet.blockSize
-                                                        // Initialize decoder immediately to start processing
-                                                        if (decoder == null && numBlocks > 0 && blockSize > 0) {
-                                                            decoder = FountainCodeDecoder(numBlocks, blockSize)
-                                                            isReconstructing = true
-                                                            processedSeeds = emptySet()
-                                                        }
+                        
+                        isCapturing -> {
+                            CaptureScreen(
+                                onBack = { isCapturing = false },
+                                onQrCodeScanned = { qrCode ->
+                                    try {
+                                        val droplet = Droplet.fromString(qrCode)
+                                        if (droplet != null) {
+                                            errorMessage = null // Clear error on successful parse
+                                            if (!receivedDroplets.containsKey(droplet.seed)) {
+                                                if (receivedDroplets.isEmpty()) {
+                                                    numBlocks = droplet.numBlocks
+                                                    fileSize = droplet.fileSize
+                                                    blockSize = droplet.blockSize
+                                                    // Initialize decoder immediately to start processing
+                                                    if (decoder == null && numBlocks > 0 && blockSize > 0) {
+                                                        decoder = FountainCodeDecoder(numBlocks, blockSize)
+                                                        isReconstructing = true
+                                                        processedSeeds = emptySet()
                                                     }
-                                                    receivedDroplets[droplet.seed] = droplet
                                                 }
+                                                receivedDroplets[droplet.seed] = droplet
                                             }
-                                        } catch (e: Exception) {
-                                            if (receivedDroplets.isEmpty()) {
-                                                errorMessage = e.message ?: "Error processing droplet"
-                                            }
-                                            Log.e("MainActivity", "Error processing droplet", e)
                                         }
-                                    },
-                                    onError = {
-                                        errorMessage = it.message ?: "An unknown camera error occurred"
+                                    } catch (e: Exception) {
+                                        if (receivedDroplets.isEmpty()) {
+                                            errorMessage = e.message ?: "Error processing droplet"
+                                        }
+                                        Log.e("MainActivity", "Error processing droplet", e)
                                     }
-                                )
-                                
-                                Column(
-                                    modifier = Modifier.fillMaxSize().padding(16.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    // Show reconstruction progress if reconstructing
-                                    if (isReconstructing) {
-                                        CircularProgressIndicator(modifier = Modifier.padding(8.dp))
-                                        Text(
-                                            text = "Reconstructing file...",
-                                            style = typography.titleMedium
-                                        )
-                                        Text(
-                                            text = String.format("%.1f%% complete", reconstructionProgress),
-                                            style = typography.bodyMedium
-                                        )
-                                        Text(
-                                            text = "$numSolved/$numBlocks blocks solved",
-                                            style = typography.bodySmall
-                                        )
-                                        Text(
-                                            text = "Keep scanning QR codes to add more droplets",
-                                            style = typography.bodySmall,
-                                            color = Color.Gray
-                                        )
+                                },
+                                onCameraError = {
+                                    errorMessage = it.message ?: "An unknown camera error occurred"
+                                },
+                                numBlocks = numBlocks,
+                                numSolved = numSolved,
+                                receivedDropletsCount = receivedDroplets.size,
+                                fileSize = fileSize,
+                                isReconstructing = isReconstructing,
+                                reconstructionProgress = reconstructionProgress,
+                                errorMessage = errorMessage,
+                                modifier = Modifier.padding(innerPadding)
+                            )
+                        }
+                        
+                        else -> {
+                            HomeScreen(
+                                onStartCapture = { isCapturing = true },
+                                onOpenWebView = {
+                                    if (unzippedContentDir != null) {
+                                        showWebView = true
                                     }
-                                    
-                                    errorMessage?.let {
-                                        Text(
-                                            text = "Error: $it",
-                                            color = Color.Red,
-                                            style = typography.bodyMedium
-                                        )
-                                    }
-                                    
-                                    if (numBlocks > 0) {
-                                        if (!isReconstructing) {
-                                            Text("Status", style = typography.headlineSmall)
-                                        }
-                                        LinearProgressIndicator(
-                                            progress = receivedDroplets.size.toFloat() / numBlocks.toFloat(),
-                                            modifier = Modifier.fillMaxWidth()
-                                        )
-                                        Text(text = "${receivedDroplets.size} droplets received")
-                                        decoder?.let { d ->
-                                            val solved = d.getNumSolved()
-                                            Text(
-                                                text = "$solved/$numBlocks blocks solved (${String.format("%.1f", d.getProgress())}%)",
-                                                style = typography.bodyMedium
-                                            )
-                                        }
-                                        Text(text = "File size: ${fileSize / 1024} KB")
-                                        if (!isReconstructing && decoder != null) {
-                                            Text(
-                                                text = "Processing droplets as they arrive...",
-                                                style = typography.bodySmall,
-                                                color = Color.Gray
-                                            )
-                                        }
-                                    } else {
-                                        if (errorMessage == null) {
-                                            Text("Scanning for QR code...")
-                                        }
-                                    }
-                                }
-                            }
+                                },
+                                hasWebContent = unzippedContentDir != null,
+                                modifier = Modifier.padding(innerPadding)
+                            )
                         }
                     }
 
@@ -283,11 +256,26 @@ class MainActivity : ComponentActivity() {
                                                             "This suggests the reconstruction is incomplete. Please scan more QR codes."
                                                     // Continue reconstruction
                                                 } else {
-                                                    reconstructedFile = saveFile(result, "reconstructed.png")
+                                                    val savedFile = saveFile(result, "reconstructed.png")
+                                                    
+                                                    // Check if it's a ZIP file and extract it
+                                                    val fileType = detectFileType(result)
+                                                    if (fileType == "zip") {
+                                                        unzippedContentDir = extractZipFile(savedFile)
+                                                        Log.d("MainActivity", "ZIP file extracted to: ${unzippedContentDir?.absolutePath}")
+                                                        // For ZIP files, skip file view and go directly to home screen
+                                                        reconstructedFile = null
+                                                        isCapturing = false
+                                                        Log.d("MainActivity", "ZIP file processed, returning to home screen")
+                                                    } else {
+                                                        // For non-ZIP files, show the file view
+                                                        reconstructedFile = savedFile
+                                                        Log.d("MainActivity", "File saved successfully: ${savedFile.absolutePath}")
+                                                    }
+                                                    
                                                     isReconstructing = false
                                                     decoder = null
                                                     processedSeeds = emptySet()
-                                                    Log.d("MainActivity", "File saved successfully: ${reconstructedFile?.absolutePath}")
                                                 }
                                             }
                                         } catch (e: Exception) {
@@ -382,6 +370,42 @@ class MainActivity : ComponentActivity() {
             Log.e("MainActivity", "Error saving file", e)
         }
         return file
+    }
+    
+    /**
+     * Extract ZIP file to a directory
+     */
+    private fun extractZipFile(zipFile: File): File? {
+        try {
+            val extractDir = File(filesDir, "extracted_${System.currentTimeMillis()}")
+            extractDir.mkdirs()
+            
+            ZipInputStream(FileInputStream(zipFile)).use { zipInputStream ->
+                var entry = zipInputStream.nextEntry
+                while (entry != null) {
+                    val entryFile = File(extractDir, entry.name)
+                    
+                    // Create parent directories if needed
+                    entryFile.parentFile?.mkdirs()
+                    
+                    // Skip if it's a directory
+                    if (!entry.isDirectory) {
+                        FileOutputStream(entryFile).use { outputStream ->
+                            zipInputStream.copyTo(outputStream)
+                        }
+                    }
+                    
+                    zipInputStream.closeEntry()
+                    entry = zipInputStream.nextEntry
+                }
+            }
+            
+            Log.d("MainActivity", "ZIP extracted to: ${extractDir.absolutePath}")
+            return extractDir
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error extracting ZIP file", e)
+            return null
+        }
     }
     
     /**
