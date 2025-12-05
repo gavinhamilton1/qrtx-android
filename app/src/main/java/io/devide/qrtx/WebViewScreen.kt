@@ -1,6 +1,11 @@
 package io.devide.qrtx
 
+import android.graphics.Bitmap
 import android.util.Log
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Box
@@ -37,11 +42,28 @@ fun WebViewScreen(
     modifier: Modifier = Modifier
 ) {
     // Find an available port
-    val serverPort = remember(contentDirectory.absolutePath) { findAvailablePort() }
+    val serverPort = remember(contentDirectory.absolutePath) { 
+        val port = findAvailablePort()
+        Log.d("WebViewScreen", "Selected port: $port for directory: ${contentDirectory.absolutePath}")
+        port
+    }
+    
+    // Log directory contents for debugging
+    LaunchedEffect(contentDirectory.absolutePath) {
+        Log.d("WebViewScreen", "Content directory: ${contentDirectory.absolutePath}")
+        Log.d("WebViewScreen", "Directory exists: ${contentDirectory.exists()}")
+        Log.d("WebViewScreen", "Is directory: ${contentDirectory.isDirectory}")
+        if (contentDirectory.exists() && contentDirectory.isDirectory) {
+            val files = contentDirectory.listFiles()?.map { it.name } ?: emptyList()
+            Log.d("WebViewScreen", "Directory contents (${files.size} items): ${files.take(20).joinToString(", ")}")
+        }
+    }
+    
     val server = remember(contentDirectory.absolutePath) {
+        Log.d("WebViewScreen", "Creating LocalWebServer on port $serverPort")
         LocalWebServer(serverPort, contentDirectory).also {
             if (it.startServer()) {
-                Log.d("WebViewScreen", "Server started on port $serverPort serving ${contentDirectory.absolutePath}")
+                Log.d("WebViewScreen", "Server started successfully on port $serverPort serving ${contentDirectory.absolutePath}")
             } else {
                 Log.e("WebViewScreen", "Failed to start server on port $serverPort")
             }
@@ -49,7 +71,11 @@ fun WebViewScreen(
     }
     
     // Use 127.0.0.1 instead of localhost for better Android compatibility
-    val serverUrl = remember(serverPort) { "http://127.0.0.1:$serverPort" }
+    val serverUrl = remember(serverPort) { 
+        val url = "http://127.0.0.1:$serverPort"
+        Log.d("WebViewScreen", "Server URL: $url")
+        url
+    }
     
     // Stop the server when leaving the screen
     DisposableEffect(contentDirectory.absolutePath) {
@@ -84,18 +110,68 @@ fun WebViewScreen(
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
                 factory = { context ->
+                    Log.d("WebViewScreen", "Creating WebView, serverUrl: $serverUrl")
                     WebView(context).apply {
-                        webViewClient = WebViewClient()
+                        webViewClient = object : WebViewClient() {
+                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                super.onPageStarted(view, url, favicon)
+                                Log.d("WebViewScreen", "Page started loading: $url")
+                            }
+                            
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                Log.d("WebViewScreen", "Page finished loading: $url")
+                            }
+                            
+                            override fun onReceivedError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                error: WebResourceError?
+                            ) {
+                                super.onReceivedError(view, request, error)
+                                Log.e("WebViewScreen", "WebView error: ${error?.description} (code: ${error?.errorCode}) for URL: ${request?.url}")
+                            }
+                            
+                            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                                val url = request?.url?.toString()
+                                Log.d("WebViewScreen", "Navigation request: $url")
+                                return false
+                            }
+                            
+                            override fun onLoadResource(view: WebView?, url: String?) {
+                                super.onLoadResource(view, url)
+                                Log.d("WebViewScreen", "Loading resource: $url")
+                            }
+                        }
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         settings.allowFileAccess = true
                         settings.allowContentAccess = true
                         settings.allowUniversalAccessFromFileURLs = true
                         
+                        // Add console message logging
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                                val level = when (consoleMessage?.messageLevel()) {
+                                    ConsoleMessage.MessageLevel.LOG -> "LOG"
+                                    ConsoleMessage.MessageLevel.WARNING -> "WARN"
+                                    ConsoleMessage.MessageLevel.ERROR -> "ERROR"
+                                    ConsoleMessage.MessageLevel.DEBUG -> "DEBUG"
+                                    else -> "INFO"
+                                }
+                                Log.d("WebViewConsole", "[$level] ${consoleMessage?.message()} -- From line ${consoleMessage?.lineNumber()} of ${consoleMessage?.sourceId()}")
+                                return true
+                            }
+                        }
+                        
+                        Log.d("WebViewScreen", "WebView settings configured, attempting to load URL: $serverUrl")
+                        
                         // Wait for server to start, then load the URL
                         serverUrl?.let { url ->
+                            Log.d("WebViewScreen", "Loading URL: $url")
                             loadUrl(url)
                         } ?: run {
+                            Log.w("WebViewScreen", "No server URL available, loading blank page")
                             loadUrl("about:blank")
                         }
                     }
@@ -103,7 +179,10 @@ fun WebViewScreen(
                 update = { webView ->
                     // Update the WebView URL if server URL changes
                     serverUrl?.let { url ->
-                        if (webView.url != url && url != "about:blank") {
+                        val currentUrl = webView.url
+                        Log.d("WebViewScreen", "WebView update - current URL: $currentUrl, target URL: $url")
+                        if (currentUrl != url && url != "about:blank") {
+                            Log.d("WebViewScreen", "Loading URL in WebView: $url")
                             webView.loadUrl(url)
                         }
                     }
